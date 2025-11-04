@@ -1,0 +1,18 @@
+# AWS CLI Example Commands — Day 1 (Compute, Storage, IAM)
+
+# IAM
+aws iam create-role --role-name S3ReadRole --assume-role-policy-document file://trust-policy.json
+aws iam attach-role-policy --role-name S3ReadRole --policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+# EC2
+aws ec2 describe-instance-types --filters "Name=processor-info.supported-architecture,Values=x86_64"
+aws ec2 run-instances --image-id ami-0abcdef1234567890 --count 1 --instance-type t3.micro --key-name MyKeyPair --subnet-id subnet-0abc1234
+
+# EBS / Snapshots
+aws ec2 create-snapshot --volume-id vol-0123456789abcdef0 --description "backup before change"
+aws ec2 modify-volume --volume-id vol-0123456789abcdef0 --size 100
+
+# S3
+aws s3 mb s3://my-unique-bucket-name-12345
+aws s3 cp file.txt s3://my-unique-bucket-name-12345/
+aws s3api put-bucket-versioning --bucket my-unique-bucket-name-12345 --versioning-configuration Status=Enabled
