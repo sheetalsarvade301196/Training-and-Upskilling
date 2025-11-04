@@ -84,7 +84,4 @@ aws s3 ls s3://my-bucket --recursive --human-readable --summarize
 
 ---
 
-## Quick quiz notes (key points)
-- When to use EBS vs EFS vs S3?
-- Which EC2 instance family is best for CPU-bound workloads?
-- What element in an IAM policy controls "when" or "from where" (Condition)?
+
