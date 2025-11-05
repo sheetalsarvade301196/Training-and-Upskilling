@@ -1,0 +1,15 @@
+# Networking, Databases & Serverless — Day 2 Notes
+
+## VPC
+- Isolated network within AWS.
+- Components: Subnets, Route Tables, Internet/NAT Gateways, Security Groups.
+- CIDR Example: `10.0.0.0/16` → 65,536 IPs.
+
+## Lambda
+- Serverless compute service.
+- Trigger from S3, DynamoDB, API Gateway.
+- CLI: `aws lambda invoke --function-name my-func output.json`
+
+## RDS
+- Managed relational database service.
+- Engines: MySQL, PostgreSQL, Aurora, Oracle, SQL Server.
