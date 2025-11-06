@@ -1,4 +1,4 @@
-# Day 3 — Security, Cost Optimization & Exam Review (Detailed Notes)
+# Day 3 — Security, Cost Optimization 
 
 ## Security (KMS, CloudTrail, Config, WAF)
 - **KMS**: Key management for encryption, CMKs, key policies, grants. Use envelope encryption for large objects.
@@ -24,9 +24,4 @@
 - Performance Efficiency — use IT and computing resources efficiently.
 - Cost Optimization — avoid unnecessary costs.
 
-## Exam Tips & Strategy
-- Read questions fully — SAA exams often include multiple constraints.
-- Look for keywords: cost-sensitive, high-availability, minimal operational overhead.
-- Be cautious with "most secure" vs "most cost-effective".
-- Time management: flag and return to tricky scenarios.
 
