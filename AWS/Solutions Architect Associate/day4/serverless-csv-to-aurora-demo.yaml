@@ -1,0 +1,397 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Deployable demo: S3 -> Lambda -> RDS MySQL (with Secrets Manager, custom S3->Lambda wiring, CloudWatch alerts)."
+
+Parameters:
+  DBUsername:
+    Type: String
+    Default: admin
+    Description: RDS master username
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: RDS master password
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: S3 bucket that contains the lambda-pymysql.zip
+  LambdaCodeS3Key:
+    Type: String
+    Description: S3 key (object name) for lambda-pymysql.zip
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Optional email for alarm notifications (leave blank to skip)
+
+Conditions:
+  CreateAlarms: !Not [!Equals [!Ref AlertEmail, ""]]
+
+Resources:
+
+  ####################
+  # Networking
+  ####################
+  DemoVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.200.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: demo-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachIGW:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DemoVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DemoVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIGW
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.200.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.200.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  SubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  ####################
+  # S3 Bucket for CSV uploads
+  ####################
+  DemoBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "demo-csv-bucket-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+
+  ####################
+  # Secrets Manager - store DB username/password
+  ####################
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "demo-db-secret-${AWS::AccountId}"
+      Description: "RDS demo DB credentials"
+      SecretString: !Sub |
+        {
+          "username":"${DBUsername}",
+          "password":"${DBPassword}"
+        }
+
+  ####################
+  # RDS Subnet Group & Security Group
+  ####################
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Demo DB subnet group (2 AZs)
+      SubnetIds:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow MySQL access (demo - open to world)"
+      VpcId: !Ref DemoVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+
+  ####################
+  # RDS MySQL instance (public for demo)
+  ####################
+  DemoDBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: demo-db-instance
+      AllocatedStorage: 20
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      EngineVersion: "8.0.37"
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      PubliclyAccessible: true
+      DeletionProtection: false
+      BackupRetentionPeriod: 1
+
+  ####################
+  # IAM role for Lambda
+  ####################
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "demo-lambda-role-${AWS::AccountId}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DemoLambdaPolicyInline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${DemoBucket}/*"
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DBSecret
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  ####################
+  # Main Lambda function (code from S3 zip you provide)
+  # Handler assumed to be index.handler (please ensure your zip has index.py with handler)
+  ####################
+  MainLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: demo-s3-to-rds
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 120
+      MemorySize: 512
+      Environment:
+        Variables:
+          SECRET_NAME: !Ref DBSecret
+          DB_HOST: !GetAtt DemoDBInstance.Endpoint.Address
+          DB_NAME: demo
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+
+  ####################
+  # Pre-create Lambda LogGroup so MetricFilter can be created reliably
+  ####################
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${MainLambda}"
+      RetentionInDays: 14
+
+  ####################
+  # Permission: allow S3 to invoke the Lambda
+  ####################
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MainLambda
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt DemoBucket.Arn
+
+  ####################
+  # Custom Lambda + Role to reliably attach S3 notification configuration
+  ####################
+  BucketNotifyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "demo-bucket-notify-role-${AWS::AccountId}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: PutBucketNotification
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutBucketNotification
+                  - s3:PutBucketNotificationConfiguration
+                Resource: !GetAtt DemoBucket.Arn
+
+  BucketNotificationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: demo-bucket-notify
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt BucketNotifyRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import urllib.request
+
+          def send_cfn_response(event, context, response_status, response_data, physical_resource_id=None):
+              response_body = json.dumps({
+                  'Status': response_status,
+                  'Reason': 'See CloudWatch Logs for details',
+                  'PhysicalResourceId': physical_resource_id or context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': response_data
+              }).encode('utf-8')
+              req = urllib.request.Request(event['ResponseURL'], data=response_body, method='PUT',
+                                           headers={'Content-Type': ''})
+              try:
+                  urllib.request.urlopen(req)
+              except Exception as e:
+                  print("Failed to send CFN response:", e)
+
+          def handler(event, context):
+              print("Received event in BucketNotificationFunction:", event)
+              s3 = boto3.client('s3')
+              props = event.get('ResourceProperties', {})
+              bucket = props.get('BucketName')
+              notif = props.get('NotificationConfiguration', {})
+              try:
+                  if event['RequestType'] in ('Create', 'Update'):
+                      s3.put_bucket_notification_configuration(Bucket=bucket, NotificationConfiguration=notif)
+                      send_cfn_response(event, context, "SUCCESS", {"Message": "Notification configured"}, bucket)
+                  elif event['RequestType'] == 'Delete':
+                      s3.put_bucket_notification_configuration(Bucket=bucket, NotificationConfiguration={})
+                      send_cfn_response(event, context, "SUCCESS", {"Message": "Notification removed"}, bucket)
+              except Exception as e:
+                  print("Error configuring bucket notification:", e)
+                  send_cfn_response(event, context, "FAILED", {"Message": str(e)}, bucket)
+
+  S3BucketNotificationCustom:
+    Type: Custom::S3BucketNotification
+    Properties:
+      ServiceToken: !GetAtt BucketNotificationFunction.Arn
+      BucketName: !Ref DemoBucket
+      NotificationConfiguration:
+        LambdaFunctionConfigurations:
+          - Events:
+              - "s3:ObjectCreated:*"
+            LambdaFunctionArn: !GetAtt MainLambda.Arn
+
+  ####################
+  # CloudWatch Metric Filter & Alarm (optional)
+  ####################
+  LambdaErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Condition: CreateAlarms
+    DependsOn: LambdaLogGroup
+    Properties:
+      LogGroupName: !Ref LambdaLogGroup
+      FilterPattern: "ERROR"
+      MetricTransformations:
+        - MetricNamespace: DemoApp
+          MetricName: LambdaErrorCount
+          MetricValue: "1"
+
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateAlarms
+    Properties:
+      AlarmDescription: "Alarm when Lambda logs contain ERROR"
+      Namespace: DemoApp
+      MetricName: LambdaErrorCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !If [CreateAlarms, !Ref AlertTopic, !Ref "AWS::NoValue"]
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Condition: CreateAlarms
+    Properties:
+      TopicName: !Sub "demo-alerts-${AWS::AccountId}"
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  ####################
+  # RDS CPU Alarm (optional)
+  ####################
+  RDSCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateAlarms
+    Properties:
+      AlarmDescription: "RDS CPU > 70%"
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DemoDBInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 70
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlertTopic
+
+Outputs:
+  S3BucketName:
+    Description: "S3 bucket to upload CSV files"
+    Value: !Ref DemoBucket
+
+  LambdaFunctionName:
+    Description: "Lambda name to process CSVs"
+    Value: !Ref MainLambda
+
+  RdsEndpoint:
+    Description: "RDS endpoint (host) - use for DB clients"
+    Value: !GetAtt DemoDBInstance.Endpoint.Address
+
+  SecretArn:
+    Description: "Secrets Manager secret ARN storing DB credentials"
+    Value: !Ref DBSecret
