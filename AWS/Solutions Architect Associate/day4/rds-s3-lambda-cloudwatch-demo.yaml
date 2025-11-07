@@ -1,0 +1,243 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Demo: RDS + S3 + Lambda + CloudWatch Alerts (Free Tier compatible)"
+
+Parameters:
+  DBUser:
+    Type: String
+    Default: admin
+    Description: Master username for RDS
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: Master user password for RDS
+
+Resources:
+
+  # -------------------- Networking --------------------
+  DemoVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.10.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: DemoVPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachIGW:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DemoVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.10.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.10.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DemoVPC
+
+  Route:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIGW
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref RouteTable
+
+  SubnetRouteAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref RouteTable
+
+  # -------------------- Security Groups --------------------
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH, HTTP, and MySQL
+      VpcId: !Ref DemoVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+
+  # -------------------- RDS --------------------
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "DB subnet group in 2 AZs"
+      SubnetIds:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+
+  DemoDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: demodb
+      Engine: mysql
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Ref DBPassword
+      AllocatedStorage: 20
+      DBInstanceClass: db.t3.micro
+      VPCSecurityGroups:
+        - !Ref SecurityGroup
+      PubliclyAccessible: true
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      BackupRetentionPeriod: 1
+      DeletionProtection: false
+      MultiAZ: false
+
+  # -------------------- S3 Bucket --------------------
+  DemoS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "demo-lambda-s3-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+
+  # -------------------- IAM Role for Lambda --------------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonRDSFullAccess
+
+  # -------------------- Lambda Function --------------------
+  DemoLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: DemoRDSLambda
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import pymysql
+          import os
+
+          def handler(event, context):
+              print("Event:", event)
+              s3 = boto3.client('s3')
+              bucket_name = os.environ['BUCKET_NAME']
+
+              # Write a test file to S3
+              s3.put_object(Bucket=bucket_name, Key='lambda-demo.txt', Body='Hello from Lambda!')
+
+              # Connect to RDS (optional demo)
+              try:
+                  conn = pymysql.connect(
+                      host=os.environ['DB_ENDPOINT'],
+                      user=os.environ['DB_USER'],
+                      password=os.environ['DB_PASS'],
+                      database='demodb',
+                      connect_timeout=3
+                  )
+                  with conn.cursor() as cur:
+                      cur.execute("SELECT NOW();")
+                      result = cur.fetchone()
+                      print("DB Time:", result)
+                  conn.close()
+              except Exception as e:
+                  print("DB connection failed:", e)
+
+              return {"status": "ok"}
+
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DemoS3Bucket
+          DB_ENDPOINT: !GetAtt DemoDB.Endpoint.Address
+          DB_USER: !Ref DBUser
+          DB_PASS: !Ref DBPassword
+
+  # -------------------- CloudWatch Alarms --------------------
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm when Lambda errors exceed 1"
+      Namespace: "AWS/Lambda"
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DemoLambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions: []
+      OKActions: []
+
+  RDSCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm when RDS CPU utilization > 70%"
+      Namespace: "AWS/RDS"
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DemoDB
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 70
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions: []
+      OKActions: []
+
+Outputs:
+  S3BucketName:
+    Description: S3 Bucket for Lambda demo
+    Value: !Ref DemoS3Bucket
+  LambdaFunctionName:
+    Description: Lambda Function Name
+    Value: !Ref DemoLambda
+  RDSInstanceEndpoint:
+    Description: Endpoint for RDS MySQL
+    Value: !GetAtt DemoDB.Endpoint.Address
+  CloudWatchAlarms:
+    Description: Lambda & RDS monitoring alarms created
+    Value: "LambdaErrorAlarm, RDSCPUAlarm"
