@@ -1,0 +1,40 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: S3 bucket for cross-account access demo (Account A)
+
+Parameters:
+  ConsumerAccountId:
+    Type: String
+    Description: AWS Account ID of Account B (data consumer)
+  ConsumerRoleName:
+    Type: String
+    Description: IAM Role Name in Account B that needs access
+
+Resources:
+  DemoBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub cross-account-demo-${AWS::AccountId}
+
+  DemoBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DemoBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCrossAccountAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${ConsumerAccountId}:role/${ConsumerRoleName}
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt DemoBucket.Arn
+              - !Sub "${DemoBucket.Arn}/*"
+
+Outputs:
+  BucketName:
+    Value: !Ref DemoBucket
+  BucketArn:
+    Value: !GetAtt DemoBucket.Arn

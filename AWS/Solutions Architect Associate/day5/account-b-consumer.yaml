@@ -1,0 +1,36 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: IAM Role for cross-account S3 access (Account B)
+
+Parameters:
+  OwnerAccountId:
+    Type: String
+    Description: AWS Account ID of Account A (S3 bucket owner)
+
+Resources:
+  CrossAccountS3AccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CrossAccountS3AccessRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${OwnerAccountId}:root
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetObject
+                Resource: "*"
+
+Outputs:
+  RoleName:
+    Value: !Ref CrossAccountS3AccessRole
+  RoleArn:
+    Value: !GetAtt CrossAccountS3AccessRole.Arn
