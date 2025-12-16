@@ -1,0 +1,267 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Serverless Product API using Lambda, DynamoDB and API Gateway
+
+Parameters:
+  TableName:
+    Type: String
+    Default: Products
+
+Resources:
+
+  ProductsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaDynamoPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                Resource: !GetAtt ProductsTable.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  AddProductFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: AddProductFunction
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TableName
+      Code:
+        ZipFile: |
+        import json
+        import boto3
+        import os
+        import uuid
+
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table(os.environ['TABLE_NAME'])
+
+        def lambda_handler(event, context):
+        body = json.loads(event['body'])
+
+        item = {
+        'id': str(uuid.uuid4()),
+        'name': body.get('name'),
+        'price': int(body.get('price'))
+        }
+
+        table.put_item(Item=item)
+
+        return {
+        'statusCode': 201,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+        },
+        'body': json.dumps(item)
+        }
+
+          
+  GetProductFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GetProductFunction
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TableName
+      Code:
+        ZipFile: |
+           import json
+            import boto3
+            import os
+            from decimal import Decimal
+
+            dynamodb = boto3.resource('dynamodb')
+            table = dynamodb.Table(os.environ['TABLE_NAME'])
+
+            def decimal_to_native(obj):
+                if isinstance(obj, Decimal):
+                    return int(obj)
+                if isinstance(obj, dict):
+                    return {k: decimal_to_native(v) for k, v in obj.items()}
+                return obj
+
+            def lambda_handler(event, context):
+                product_id = event['pathParameters']['id']
+                response = table.get_item(Key={'id': product_id})
+                item = decimal_to_native(response.get('Item', {}))
+
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps(item)
+                }
+
+
+  ListProductsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ListProductsFunction
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TableName
+      Code:
+        ZipFile: |
+            import json
+            import boto3
+            import os
+            from decimal import Decimal
+
+            dynamodb = boto3.resource('dynamodb')
+            table = dynamodb.Table(os.environ['TABLE_NAME'])
+
+            # Helper function to convert Decimal
+            def decimal_to_native(obj):
+                if isinstance(obj, Decimal):
+                    return int(obj)
+                if isinstance(obj, list):
+                    return [decimal_to_native(i) for i in obj]
+                if isinstance(obj, dict):
+                    return {k: decimal_to_native(v) for k, v in obj.items()}
+                return obj
+
+            def lambda_handler(event, context):
+                response = table.scan()
+                items = decimal_to_native(response.get('Items', []))
+
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps(items)
+                }
+
+
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: ProductsApi
+
+  ProductResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: product
+
+  ProductIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref ProductResource
+      PathPart: '{id}'
+
+  PostProductMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ProductResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AddProductFunction.Arn}/invocations
+
+  GetProductMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ProductIdResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GetProductFunction.Arn}/invocations
+
+  ListProductMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ProductResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ListProductsFunction.Arn}/invocations
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - PostProductMethod
+      - GetProductMethod
+      - ListProductMethod
+    Properties:
+      RestApiId: !Ref ApiGateway
+      StageName: prod
+
+  AddPermissionPost:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AddProductFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+  AddPermissionGet:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GetProductFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+  AddPermissionList:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ListProductsFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/product
