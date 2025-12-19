@@ -1,0 +1,70 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private EC2 instance running K3s (No Public IP, Region Safe)
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID
+
+  PrivateSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet ID
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair
+
+  ALBSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: ALB Security Group ID
+
+Resources:
+  K3sNodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: K3s private node SG
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 30080
+          ToPort: 30080
+          SourceSecurityGroupId: !Ref ALBSecurityGroupId
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  K3sInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      KeyName: !Ref KeyName
+
+      # ✅ REGION-INDEPENDENT AMI (FIX)
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}"
+
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref PrivateSubnetId
+          GroupSet:
+            - !Ref K3sNodeSecurityGroup
+          AssociatePublicIpAddress: false
+
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          yum install -y curl
+          curl -sfL https://get.k3s.io | sh -
+
+Outputs:
+  K3sInstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref K3sInstance
+
+  K3sPrivateIP:
+    Description: Private IP of the K3s node
+    Value: !GetAtt K3sInstance.PrivateIp
